@@ -17,7 +17,11 @@ import android.graphics.drawable.GradientDrawable
 import android.media.AudioAttributes
 import android.media.SoundPool
 import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.Uri
+import android.net.wifi.SupplicantState
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Bundle
@@ -56,25 +60,27 @@ private class WifiView(c: Context) : View(c) {
     var level = -1
         set(v) { field = v; invalidate() }
     private val on = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 3.2f
+        color = Color.WHITE; style = Paint.Style.STROKE
     }
     private val off = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(70, 255, 255, 255); style = Paint.Style.STROKE; strokeWidth = 3.2f
+        color = Color.argb(90, 255, 255, 255); style = Paint.Style.STROKE
     }
     private val dotOn = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
-    private val dotOff = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(70, 255, 255, 255) }
+    private val dotOff = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(90, 255, 255, 255) }
 
     override fun onDraw(canvas: Canvas) {
+        val sw = height * 0.11f
+        on.strokeWidth = sw; off.strokeWidth = sw
         val cx = width / 2f
-        val cy = height - 3f
+        val cy = height - sw
         val active = if (level < 0) 0 else 1 + level / 2
-        val radii = floatArrayOf(height * 0.38f, height * 0.68f, height * 0.98f)
+        val radii = floatArrayOf(height * 0.33f, height * 0.60f, height * 0.87f)
         for (i in 0 until 3) {
             val r = radii[i]
             canvas.drawArc(RectF(cx - r, cy - r, cx + r, cy + r), 225f, 90f, false,
                 if (i < active) on else off)
         }
-        canvas.drawCircle(cx, cy, 2.4f, if (level >= 0) dotOn else dotOff)
+        canvas.drawCircle(cx, cy, sw * 0.8f, if (level >= 0) dotOn else dotOff)
     }
 }
 
@@ -118,6 +124,7 @@ class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
     private var loadGen = 0
     private lateinit var tiles: List<Tile>
+    private val homeViews = mutableListOf<View>()   // título + mosaicos: se ocultan al abrir la lista de apps
     private val boxes = mutableListOf<FrameLayout>()
     private val icons = mutableListOf<ImageView>()
     private val badges = mutableListOf<TextView?>()
@@ -268,7 +275,10 @@ class MainActivity : Activity() {
             Tile("Contactos", R.drawable.ic_person) { openWhatsApp() },
             Tile("Ajustes", R.drawable.ic_wrench) { launch(Intent(Settings.ACTION_SETTINGS)) },
             Tile("Snapmatic", R.drawable.ic_snapmatic, keepColor = true) { openCamera() },
-            Tile("Internet", R.drawable.ic_globe) { openUrl("https://www.google.com") }
+            Tile("Internet", R.drawable.ic_globe) {
+                // Abre la app de Google; si no está instalada, abre google.com en el navegador
+                if (!launchPackage("com.google.android.googlequicksearchbox")) openUrl("https://www.google.com")
+            }
         )
 
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
@@ -306,14 +316,17 @@ class MainActivity : Activity() {
             setPadding(dp(4), dp(8), 0, dp(14))
         }
         main.addView(titleView)
+        homeViews.add(titleView)
 
         // Mosaicos 3 columnas
         val size = (resources.displayMetrics.widthPixels - dp(28)) / 3 - dp(8)
         var row: LinearLayout? = null
         tiles.forEachIndexed { i, t ->
             if (i % 3 == 0) {
-                row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-                main.addView(row)
+                val r = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                row = r
+                main.addView(r)
+                homeViews.add(r)
             }
             val box = FrameLayout(this).apply {
                 layoutParams = LinearLayout.LayoutParams(size, size).apply {
@@ -351,7 +364,9 @@ class MainActivity : Activity() {
             row!!.addView(box)
         }
 
-        main.addView(View(this), LinearLayout.LayoutParams(0, 0, 1f))
+        val spacer = View(this)
+        main.addView(spacer, LinearLayout.LayoutParams(0, 0, 1f))
+        homeViews.add(spacer)
 
         // Línea separadora + barra inferior (+ verde y flecha roja)
         main.addView(View(this).apply { setBackgroundColor(Color.parseColor("#6B6865")) },
@@ -391,7 +406,7 @@ class MainActivity : Activity() {
         }
         val drawerContent = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(40), dp(18), dp(90))
+            setPadding(dp(4), dp(4), dp(4), dp(8))
             addView(TextView(this@MainActivity).apply {
                 text = "Aplicaciones"; setTextColor(Color.WHITE); textSize = 30f
                 typeface = Typeface.create("sans-serif", Typeface.NORMAL)
@@ -403,9 +418,9 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.BLACK); visibility = View.GONE
             addView(drawerContent)
         }
-        root.addView(drawer)
-        main.bringToFront()
-        bottom.bringToFront()
+        // La lista va dentro de la columna principal, entre la barra de estado y la barra de abajo
+        main.addView(drawer, main.indexOfChild(spacer) + 1,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
         if (SHOW_BORDER) root.addView(View(this).apply {
             background = GradientDrawable().apply {
@@ -450,6 +465,12 @@ class MainActivity : Activity() {
             addAction(ConnectivityManager.CONNECTIVITY_ACTION)
         }
         registerReceiver(statusReceiver, f)
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            cm.registerNetworkCallback(
+                NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(),
+                wifiCallback)
+        } catch (e: Exception) { /* si falla, queda el refresco por broadcasts */ }
         refreshStatus()
         NotificationCounter.onChange = { refreshBadges() }
         refreshBadges()
@@ -457,6 +478,10 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         NotificationCounter.onChange = null
+        try {
+            (getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager)
+                .unregisterNetworkCallback(wifiCallback)
+        } catch (e: Exception) { }
         unregisterReceiver(statusReceiver)
         super.onStop()
     }
@@ -475,16 +500,41 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
+    // En Android 10+ el sistema oculta varios datos del wifi (red, SSID) si la app no tiene permiso de
+    // ubicación, y por eso el ícono antes quedaba siempre apagado. Ahora se detecta el wifi por la
+    // lista de redes activas, que no necesita permisos extra.
     @Suppress("DEPRECATION")
     private fun wifiLevel(): Int {
         return try {
             val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             if (!wm.isWifiEnabled) return -1
-            val info = wm.connectionInfo ?: return -1
-            if (info.networkId == -1) return -1
-            if (info.rssi <= -127) 2 else WifiManager.calculateSignalLevel(info.rssi, 5)
+            val info = wm.connectionInfo
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val onWifi = cm.allNetworks.any {
+                cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            }
+            val connected = onWifi || info?.supplicantState == SupplicantState.COMPLETED
+            if (!connected) return -1
+            val rssi = info?.rssi ?: -127
+            when {
+                rssi <= -127 -> 2      // conectado pero Android no informa la señal: se muestra a la mitad
+                rssi >= -55 -> 4
+                rssi >= -65 -> 3
+                rssi >= -75 -> 2
+                rssi >= -85 -> 1
+                else -> 0
+            }
         } catch (e: Exception) {
             -1
+        }
+    }
+
+    // Avisa al instante cuando el wifi se conecta, se corta o cambia la señal
+    private val wifiCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) { ui.post { refreshStatus() } }
+        override fun onLost(network: Network) { ui.post { refreshStatus() } }
+        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+            ui.post { refreshStatus() }
         }
     }
 
@@ -513,9 +563,15 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun openDrawer() { drawer.visibility = View.VISIBLE }
+    private fun openDrawer() {
+        homeViews.forEach { it.visibility = View.GONE }
+        drawer.visibility = View.VISIBLE
+    }
 
-    private fun closeDrawer() { drawer.visibility = View.GONE }
+    private fun closeDrawer() {
+        drawer.visibility = View.GONE
+        homeViews.forEach { it.visibility = View.VISIBLE }
+    }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
